@@ -1,0 +1,5 @@
+0 Hoodies
+1 Polo Shirts
+2 Rucksäcke
+3 Brotdose
+4 Was anderes 
