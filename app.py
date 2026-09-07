@@ -98,34 +98,41 @@ st.markdown("""
 
 
 # ==========================================
-# 2. DATENBANK LOGIK (SQLite)
+# 2. DATENBANK LOGIK & AUTOMATISCHE MIGRATION
 # ==========================================
 DB_FILE = "fundbuero.db"
 
 def init_db():
-    """Initialisiert die SQLite-Datenbank."""
+    """Erstellt die Tabelle und fügt fehlende Spalten automatisch hinzu."""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''
         CREATE TABLE IF NOT EXISTS items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT NOT NULL,
-            type TEXT NOT NULL, -- 'Gefunden' oder 'Verloren'
+            type TEXT NOT NULL,
             category TEXT NOT NULL,
             location TEXT NOT NULL,
             date TEXT NOT NULL,
             description TEXT,
-            status TEXT DEFAULT 'Offen', -- 'Offen' oder 'Gefunden / Gelöst'
+            status TEXT DEFAULT 'Offen',
             image_path TEXT,
             user_name TEXT,
             finder_name TEXT
         )
     ''')
+    
+    # Prüft vorhandene Spalten und rüstet 'finder_name' bei alten Datenbanken nach
+    c.execute("PRAGMA table_info(items)")
+    columns = [col[1] for col in c.fetchall()]
+    if "finder_name" not in columns:
+        c.execute("ALTER TABLE items ADD COLUMN finder_name TEXT")
+        
     conn.commit()
     conn.close()
 
 def add_item(title, item_type, category, location, date_str, description, image_path, user_name):
-    """Fügt eine neue Verlustanfrage oder ein Fundstück hinzu."""
+    """Fügt einen neuen Eintrag hinzu."""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''
@@ -273,7 +280,6 @@ def view_dashboard():
 
     st.markdown("---")
 
-    # Zwei Aktionsbuttons
     col_lost, col_found = st.columns(2)
     with col_lost:
         if st.button("🔴 Anfrage: Ich habe etwas VERLOREN", use_container_width=True):
@@ -302,7 +308,18 @@ def view_dashboard():
         st.info("Keine passenden Einträge oder Anfragen vorhanden.")
     else:
         for item in items:
-            item_id, title, itype, category, location, date_str, desc, status, img_path, user, finder = item
+            # SICHERS ENTPACKEN (Verhindert Absturz bei unterschiedlichen Datenbank-Ständen)
+            item_id = item[0]
+            title = item[1]
+            itype = item[2]
+            category = item[3]
+            location = item[4]
+            date_str = item[5]
+            desc = item[6]
+            status = item[7] if len(item) > 7 else "Offen"
+            img_path = item[8] if len(item) > 8 else None
+            user = item[9] if len(item) > 9 else "Anonym"
+            finder = item[10] if len(item) > 10 else "-"
             
             # Badge Styling
             if status == "Gefunden / Gelöst":
@@ -324,11 +341,9 @@ def view_dashboard():
                 </div>
                 """, unsafe_allow_html=True)
                 
-                # Wenn ein Bild vorhanden ist
                 if img_path and os.path.exists(img_path):
                     st.image(img_path, width=220)
 
-                # "Ich habe das gefunden" Button für offene Verlustanfragen
                 if itype == "Verloren" and status == "Offen":
                     col_act1, col_act2 = st.columns([2, 1])
                     with col_act2:
@@ -354,7 +369,6 @@ def view_add_item():
     detected_category = "Sonstiges"
     saved_img_path = None
 
-    # Bild-Upload / Kamera ist bei "Gefunden" im Fokus, bei "Verloren" optional
     if not is_lost:
         st.subheader("1. Foto aufnehmen / hochladen (für KI-Erkennung)")
         upload_method = st.radio("Foto-Quelle wählen:", ["Kamera-Scanner", "Datei-Upload"], horizontal=True)
@@ -375,7 +389,6 @@ def view_add_item():
         saved_img_path = os.path.join("uploads", f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg")
         image.save(saved_img_path)
 
-    # Formular
     st.subheader("2. Details eingeben")
     with st.form("add_item_form"):
         title = st.text_input("Was wurde " + ("verloren?" if is_lost else "gefunden?"), 
