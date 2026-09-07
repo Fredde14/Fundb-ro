@@ -15,10 +15,8 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# Custom CSS für edles, maßgeschneidertes Schulinstituts-Design (Navy/Slate/Grey)
 st.markdown("""
 <style>
-    /* Hauptfarben & Hintergründe */
     :root {
         --primary-navy: #1E3A8A;
         --secondary-slate: #475569;
@@ -27,13 +25,11 @@ st.markdown("""
         --accent-blue: #3B82F6;
     }
 
-    /* Globale Resets */
     .stApp {
         background-color: var(--bg-soft-grey);
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     }
 
-    /* Schul-Branding Header */
     .brand-header {
         background-color: var(--primary-navy);
         color: white;
@@ -47,7 +43,6 @@ st.markdown("""
         margin: 0;
         font-size: 1.6rem;
         font-weight: 700;
-        letter-spacing: 0.5px;
         color: #FFFFFF !important;
     }
     .brand-header p {
@@ -58,29 +53,18 @@ st.markdown("""
         letter-spacing: 1.5px;
     }
 
-    /* Auth Cards */
-    .auth-card {
-        background-color: var(--card-bg);
-        padding: 28px;
-        border-radius: 12px;
-        border: 1px solid #E2E8F0;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.04);
-        margin-bottom: 20px;
-    }
-
-    /* Custom Cards für Feed */
     .item-card {
         background-color: var(--card-bg);
         border: 1px solid #E2E8F0;
         border-radius: 10px;
         padding: 16px;
-        margin-bottom: 16px;
+        margin-bottom: 12px;
         box-shadow: 0 2px 4px rgba(0,0,0,0.02);
     }
     .badge-found {
         background-color: #DEF7EC;
         color: #03543F;
-        padding: 3px 8px;
+        padding: 4px 10px;
         border-radius: 6px;
         font-size: 0.75rem;
         font-weight: 600;
@@ -88,29 +72,25 @@ st.markdown("""
     .badge-lost {
         background-color: #FDE8E8;
         color: #9B1C1C;
-        padding: 3px 8px;
+        padding: 4px 10px;
+        border-radius: 6px;
+        font-size: 0.75rem;
+        font-weight: 600;
+    }
+    .badge-resolved {
+        background-color: #E0E7FF;
+        color: #3730A3;
+        padding: 4px 10px;
         border-radius: 6px;
         font-size: 0.75rem;
         font-weight: 600;
     }
 
-    /* Streamlit Button Styling Overrides */
-    div.stButton > button {
-        border-radius: 8px;
-        border: none;
-        font-weight: 600;
-        transition: all 0.2s ease;
-    }
     div.stButton > button[kind="primary"] {
         background-color: var(--primary-navy);
         color: white;
     }
-    div.stButton > button[kind="primary"]:hover {
-        background-color: #1E40AF;
-        border-color: transparent;
-    }
 
-    /* Verstecke Standard Streamlit UI-Elemente */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
 </style>
@@ -135,27 +115,40 @@ def init_db():
             location TEXT NOT NULL,
             date TEXT NOT NULL,
             description TEXT,
-            status TEXT DEFAULT 'Offen',
+            status TEXT DEFAULT 'Offen', -- 'Offen' oder 'Gefunden / Gelöst'
             image_path TEXT,
-            user_name TEXT
+            user_name TEXT,
+            finder_name TEXT
         )
     ''')
     conn.commit()
     conn.close()
 
 def add_item(title, item_type, category, location, date_str, description, image_path, user_name):
-    """Fügt ein neues Fundstück/Verluststück hinzu."""
+    """Fügt eine neue Verlustanfrage oder ein Fundstück hinzu."""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''
-        INSERT INTO items (title, type, category, location, date, description, image_path, user_name)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO items (title, type, category, location, date, description, status, image_path, user_name)
+        VALUES (?, ?, ?, ?, ?, ?, 'Offen', ?, ?)
     ''', (title, item_type, category, location, date_str, description, image_path, user_name))
     conn.commit()
     conn.close()
 
+def mark_as_found(item_id, finder_name):
+    """Markiert eine Verlustanfrage als von jemandem gefunden."""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''
+        UPDATE items
+        SET status = 'Gefunden / Gelöst', finder_name = ?
+        WHERE id = ?
+    ''', (finder_name, item_id))
+    conn.commit()
+    conn.close()
+
 def get_items(filter_type=None, category=None):
-    """Lädt Einträge mit optionalen Filtern."""
+    """Lädt Einträge aus der Datenbank."""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     query = "SELECT * FROM items WHERE 1=1"
@@ -184,30 +177,23 @@ LABELS = ["Bekleidung/Jacke", "Elektronik/Handy", "Schlüssel", "Rucksack/Tasche
 
 @st.cache_resource
 def load_keras_model():
-    """Lädt das Keras-Modell oder gibt None zurück, falls nicht vorhanden."""
     model_path = "keras_model.h5"
     if os.path.exists(model_path):
         try:
             import tensorflow as tf
-            model = tf.keras.models.load_model(model_path, compile=False)
-            return model
-        except Exception as e:
-            st.warning(f"Modell konnte nicht geladen werden: {e}")
-            return None
+            return tf.keras.models.load_model(model_path, compile=False)
+        except Exception:
+            try:
+                import tf_keras as keras
+                return keras.models.load_model(model_path, compile=False)
+            except Exception:
+                return None
     return None
 
 def predict_category(image: Image.Image):
-    """
-    Verarbeitet das Bild auf [224, 224, 3], normalisiert es
-    und führt eine Vorhersage durch. Nutzt Fallback bei fehlendem Modell.
-    """
     model = load_keras_model()
-    
-    # Preprocessing
     img_resized = image.convert("RGB").resize((224, 224))
     img_array = np.asarray(img_resized, dtype=np.float32)
-    
-    # Normalisierung auf [0, 1] (oder [-1, 1] je nach Modell)
     normalized_image_array = (img_array / 127.5) - 1.0
     data = np.expand_dims(normalized_image_array, axis=0)
 
@@ -220,8 +206,6 @@ def predict_category(image: Image.Image):
         except Exception:
             pass
 
-    # ELEGANTER FALLBACK (Falls kein Modell vorhanden ist)
-    # Bildanalyse-Dummy anhand von Farbüberwiegenheit oder Zufallsauswahl für Demo
     avg_color = img_array.mean()
     fallback_index = int(avg_color) % len(LABELS)
     return LABELS[fallback_index], 0.82
@@ -237,7 +221,7 @@ if "username" not in st.session_state:
 if "active_view" not in st.session_state:
     st.session_state.active_view = "dashboard"
 if "action_type" not in st.session_state:
-    st.session_state.action_type = "Gefunden"  # 'Gefunden' oder 'Verloren'
+    st.session_state.action_type = "Gefunden"
 
 
 # ==========================================
@@ -245,7 +229,6 @@ if "action_type" not in st.session_state:
 # ==========================================
 
 def render_header():
-    """Zeigt den einheitlichen Schul-Header."""
     st.markdown("""
     <div class="brand-header">
         <p>Katharineum zu Lübeck</p>
@@ -253,19 +236,16 @@ def render_header():
     </div>
     """, unsafe_allow_html=True)
 
-# --- VIEW 1: AUTHENTIFIZIERUNG ---
+# --- LOGIN SCREEN ---
 def view_login():
     render_header()
-    
     col1, col2, col3 = st.columns([1, 8, 1])
     with col2:
         st.markdown("<h3 style='text-align: center; color: #475569;'>Anmeldung</h3>", unsafe_allow_html=True)
-        
         with st.form("login_form"):
             user_input = st.text_input("Anmeldename", placeholder="z. B. s.müller")
             password_input = st.text_input("Passwort", type="password", placeholder="••••••••")
             submit = st.form_submit_button("Anmelden", use_container_width=True, type="primary")
-            
             if submit:
                 if user_input and password_input:
                     st.session_state.logged_in = True
@@ -273,18 +253,16 @@ def view_login():
                     st.rerun()
                 else:
                     st.error("Bitte gib Anmeldename und Passwort ein.")
-                    
         c1, c2 = st.columns(2)
         with c1:
             st.caption("[Anmeldename vergessen?](#)")
         with c2:
             st.caption("[Passwort vergessen?](#)")
 
-# --- VIEW 2: HAUPT-DASHBOARD ---
+# --- DASHBOARD ---
 def view_dashboard():
     render_header()
     
-    # Nutzer-Begrüßung & Logout
     col_user, col_logout = st.columns([3, 1])
     with col_user:
         st.write(f"Angemeldet als: **{st.session_state.username}**")
@@ -295,11 +273,10 @@ def view_dashboard():
 
     st.markdown("---")
 
-    # Zwei prominente Haupt-Aktionsbuttons
+    # Zwei Aktionsbuttons
     col_lost, col_found = st.columns(2)
-    
     with col_lost:
-        if st.button("🔴 Ich habe etwas VERLOREN", use_container_width=True):
+        if st.button("🔴 Anfrage: Ich habe etwas VERLOREN", use_container_width=True):
             st.session_state.action_type = "Verloren"
             st.session_state.active_view = "add_item"
             st.rerun()
@@ -311,43 +288,57 @@ def view_dashboard():
             st.rerun()
 
     st.markdown("<br>", unsafe_allow_html=True)
-
-    # Schnellauswahl & Filterleiste
-    st.subheader("Fundstücke & Verlustmeldungen")
+    st.subheader("Übersicht & Anfragen")
     
     col_f1, col_f2 = st.columns([1, 1])
     with col_f1:
-        type_filter = st.selectbox("Typ", ["Alle", "Gefunden", "Verloren"])
+        type_filter = st.selectbox("Filter nach Typ", ["Alle", "Verloren", "Gefunden"])
     with col_f2:
         cat_filter = st.selectbox("Kategorie", ["Alle"] + LABELS)
 
-    # Fundstück-Feed
     items = get_items(filter_type=type_filter, category=cat_filter)
     
     if not items:
-        st.info("Keine passenden Einträge vorhanden.")
+        st.info("Keine passenden Einträge oder Anfragen vorhanden.")
     else:
         for item in items:
-            item_id, title, itype, category, location, date_str, desc, status, img_path, user = item
+            item_id, title, itype, category, location, date_str, desc, status, img_path, user, finder = item
             
-            badge_class = "badge-found" if itype == "Gefunden" else "badge-lost"
-            
+            # Badge Styling
+            if status == "Gefunden / Gelöst":
+                badge_html = f'<span class="badge-resolved">GELÖST (Gefunden von {finder})</span>'
+            elif itype == "Gefunden":
+                badge_html = '<span class="badge-found">GEFUNDEN</span>'
+            else:
+                badge_html = '<span class="badge-lost">VERLUST-ANFRAGE</span>'
+
             with st.container():
                 st.markdown(f"""
                 <div class="item-card">
-                    <span class="{badge_class}">{itype.upper()}</span>
+                    {badge_html}
                     <strong style="margin-left: 8px; font-size: 1.1rem;">{title}</strong>
                     <p style="color: #64748B; margin: 6px 0 2px 0; font-size: 0.85rem;">
-                        📍 <b>Ort:</b> {location} | 📅 <b>Datum:</b> {date_str} | 🏷️ <b>Kategorie:</b> {category}
+                        📍 <b>Ort:</b> {location} | 📅 <b>Datum:</b> {date_str} | 🏷️ <b>Kategorie:</b> {category} | 👤 <b>Von:</b> {user}
                     </p>
-                    <p style="margin-top: 6px; font-size: 0.95rem;">{desc if desc else 'Keine zusätzliche Beschreibung.'}</p>
+                    <p style="margin-top: 6px; font-size: 0.95rem;">{desc if desc else 'Keine Beschreibung vorhanden.'}</p>
                 </div>
                 """, unsafe_allow_html=True)
                 
+                # Wenn ein Bild vorhanden ist
                 if img_path and os.path.exists(img_path):
-                    st.image(img_path, width=200)
+                    st.image(img_path, width=220)
 
-# --- VIEW 3: KAMERA / UPLOAD & KI-ERKENNUNG ---
+                # "Ich habe das gefunden" Button für offene Verlustanfragen
+                if itype == "Verloren" and status == "Offen":
+                    col_act1, col_act2 = st.columns([2, 1])
+                    with col_act2:
+                        if st.button("🎉 Ich habe das gefunden!", key=f"found_btn_{item_id}", type="primary"):
+                            mark_as_found(item_id, st.session_state.username)
+                            st.success(f"Danke! Die Anfrage '{title}' wurde als gefunden markiert.")
+                            st.rerun()
+                st.markdown("---")
+
+# --- ANFRAGE / FUNDSTÜCK ERSTELLEN ---
 def view_add_item():
     render_header()
     
@@ -355,53 +346,55 @@ def view_add_item():
         st.session_state.active_view = "dashboard"
         st.rerun()
 
-    action_label = "Fundstück melden" if st.session_state.action_type == "Gefunden" else "Verlust melden"
-    st.title(action_label)
+    is_lost = st.session_state.action_type == "Verloren"
+    action_title = "Verlustanfrage stellen" if is_lost else "Gefundenen Gegenstand melden"
+    st.title(action_title)
 
-    # Upload-Optionen: Kamera oder Datei-Upload
-    upload_method = st.radio("Foto-Quelle wählen:", ["Kamera-Scanner", "Datei-Upload"], horizontal=True)
-    
     uploaded_image = None
-    if upload_method == "Kamera-Scanner":
-        uploaded_image = st.camera_input("Kamera zum Sache detektieren")
-    else:
-        uploaded_image = st.file_uploader("Bild auswählen", type=["jpg", "jpeg", "png"])
-
     detected_category = "Sonstiges"
-    confidence_score = 0.0
     saved_img_path = None
 
-    # KI-Klassifikation ausführen, sobald ein Bild vorliegt
+    # Bild-Upload / Kamera ist bei "Gefunden" im Fokus, bei "Verloren" optional
+    if not is_lost:
+        st.subheader("1. Foto aufnehmen / hochladen (für KI-Erkennung)")
+        upload_method = st.radio("Foto-Quelle wählen:", ["Kamera-Scanner", "Datei-Upload"], horizontal=True)
+        if upload_method == "Kamera-Scanner":
+            uploaded_image = st.camera_input("Kamera zum Sache detektieren")
+        else:
+            uploaded_image = st.file_uploader("Bild auswählen", type=["jpg", "jpeg", "png"])
+    else:
+        st.info("💡 Wenn du ein Vergleichsfoto oder Beispielbild hast, kannst du es optional hochladen.")
+        uploaded_image = st.file_uploader("Foto hinzufügen (optional)", type=["jpg", "jpeg", "png"])
+
     if uploaded_image:
         image = Image.open(uploaded_image)
-        
-        # KI-Vorhersage
         detected_category, confidence_score = predict_category(image)
+        st.success(f"🤖 **KI-Erkennung:** Vorab eingeordnet als **{detected_category}**")
         
-        st.success(f"🤖 **KI-Erkennung:** Automatisch als **{detected_category}** erkannt ({confidence_score*100:.1f}% Konfidenz)")
-        
-        # Bild lokal im Ordner 'uploads' speichern
         os.makedirs("uploads", exist_ok=True)
         saved_img_path = os.path.join("uploads", f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg")
         image.save(saved_img_path)
 
-    # Formular zur Bestätigung/Korrektur
+    # Formular
+    st.subheader("2. Details eingeben")
     with st.form("add_item_form"):
-        title = st.text_input("Bezeichnung / Titel", placeholder="z. B. Blaue Regentasse, Schlüsselbund...")
+        title = st.text_input("Was wurde " + ("verloren?" if is_lost else "gefunden?"), 
+                              placeholder="z. B. Blauer Schulrucksack, Schlüsselbund mit rotem Band...")
         
-        # KI-Vorauswahl setzen
         cat_index = LABELS.index(detected_category) if detected_category in LABELS else 0
-        category = st.selectbox("Kategorie (KI-Vorschlag verfeinern)", LABELS, index=cat_index)
+        category = st.selectbox("Kategorie", LABELS, index=cat_index)
         
-        location = st.text_input("Fundort / Verlustort", placeholder="z. B. Sporthalle, Mensa, Raum 204")
+        location = st.text_input("Vermuteter Ort", placeholder="z. B. Sporthalle, Mensa, Raum 204")
         date_val = st.date_input("Datum", datetime.date.today())
-        description = st.text_area("Zusätzliche Details / Hinweise", placeholder="Besondere Merkmale, Marken, Inhalt...")
+        description = st.text_area("Beschreibung & Merkmale", 
+                                   placeholder="Genauere Beschreibung, damit Besitzer/Finder den Gegenstand zuordnen können.")
 
-        submit = st.form_submit_button("Eintrag veröffentlichen", type="primary", use_container_width=True)
+        button_text = "Verlustanfrage veröffentlichen" if is_lost else "Fundstück eintragen"
+        submit = st.form_submit_button(button_text, type="primary", use_container_width=True)
 
         if submit:
             if not title or not location:
-                st.error("Bitte gib mindestens einen Titel und den Ort an.")
+                st.error("Bitte gib mindestens den Namen des Gegenstands und den Ort an.")
             else:
                 add_item(
                     title=title,
@@ -413,7 +406,7 @@ def view_add_item():
                     image_path=saved_img_path,
                     user_name=st.session_state.username
                 )
-                st.success("Erfolgreich gespeichert!")
+                st.success("Erfolgreich eingetragen!")
                 st.session_state.active_view = "dashboard"
                 st.rerun()
 
